@@ -1,41 +1,116 @@
 // coach/page.tsx — صفحة الـ AI Coach
 //
-// هنا بعدين يجي Groq API (Llama 3.3)
-// الحين نسوي الواجهة الأساسية
+// مربوطة بالبروكسي على Render:
+//   - Insights: يسحب بيانات من Supabase ويرسلها للـ AI
+//   - Chat: محادثة مباشرة مع الـ AI عبر Groq
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { supabase } from "@/lib/supabase";
 
-// رسائل مؤقتة — بعدين تجي من الـ AI
-const MOCK_INSIGHTS = [
-  {
-    type: "daily" as const,
-    title: "Today's Recommendation",
-    message:
-      "Recovery at 78% — good to train. Stick to your planned RPE of 8. Focus on progressive overload on compound movements.",
-    icon: "💪",
-  },
-  {
-    type: "weekly" as const,
-    title: "Weekly Summary",
-    message:
-      "You hit all 5 sessions this week. Average weight trending down by 0.3kg. Protein target hit 6/7 days — great consistency!",
-    icon: "📊",
-  },
-  {
-    type: "tip" as const,
-    title: "Coach Tip",
-    message:
-      "Your sleep score has been dropping. Try to get to bed 30 minutes earlier this week for better recovery.",
-    icon: "💡",
-  },
-];
+// =============================================
+// رابط البروكسي
+// =============================================
+const PROXY_URL = "https://fitcoach-proxy.onrender.com";
+
+// =============================================
+// أنواع البيانات
+// =============================================
+type Insight = {
+  type: string;
+  title: string;
+  message: string;
+  icon: string;
+};
 
 export default function CoachPage() {
   const [activeTab, setActiveTab] = useState<"insights" | "chat">("insights");
+  const [insights, setInsights] = useState<Insight[]>([]);
+  const [loadingInsights, setLoadingInsights] = useState(true);
+  const [insightsError, setInsightsError] = useState("");
+
+  // =============================================
+  // سحب Insights من الـ AI
+  // =============================================
+  useEffect(() => {
+    loadInsights();
+  }, []);
+
+  const loadInsights = async () => {
+    setLoadingInsights(true);
+    setInsightsError("");
+
+    try {
+      // 1. نسحب بيانات المستخدم من Supabase
+      const today = new Date().toISOString().split("T")[0];
+      const weekAgo = new Date(Date.now() - 7 * 86400000)
+        .toISOString()
+        .split("T")[0];
+
+      // آخر وزن
+      const { data: weightData } = await supabase
+        .from("weight_logs")
+        .select("weight_kg, log_date")
+        .order("log_date", { ascending: false })
+        .limit(7);
+
+      // عادات آخر 7 أيام
+      const { data: habitsData } = await supabase
+        .from("daily_habits")
+        .select("*")
+        .gte("log_date", weekAgo)
+        .order("log_date", { ascending: false });
+
+      // تمارين آخر 7 أيام
+      const { data: workoutData } = await supabase
+        .from("workout_logs")
+        .select("*, exercises(name)")
+        .gte("log_date", weekAgo)
+        .order("log_date", { ascending: false });
+
+      const userData = {
+        recentWeights: weightData || [],
+        recentHabits: habitsData || [],
+        recentWorkouts: (workoutData || []).map((w) => ({
+          date: w.log_date,
+          exercise: (w.exercises as { name: string } | null)?.name || "Unknown",
+          weight_kg: w.weight_kg,
+          reps: w.reps,
+          rpe: w.rpe,
+        })),
+        today,
+      };
+
+      // 2. نرسل للبروكسي
+      const res = await fetch(`${PROXY_URL}/api/coach/insights`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userData }),
+      });
+
+      if (!res.ok) throw new Error("Failed to get insights");
+
+      const data = await res.json();
+      setInsights(data.insights || []);
+    } catch (err) {
+      console.error("Insights error:", err);
+      setInsightsError("Could not load insights. The AI server might be warming up — try again in a minute.");
+      // Fallback insights
+      setInsights([
+        {
+          type: "tip",
+          title: "Coach Tip",
+          message: "Start logging your workouts and weight to get personalized AI insights!",
+          icon: "💡",
+        },
+      ]);
+    } finally {
+      setLoadingInsights(false);
+    }
+  };
 
   return (
-    <div className="px-4 pt-6">
+    <div className="px-4 pt-6 pb-28">
       <header className="mb-4">
         <h1 className="text-2xl font-bold text-slate-900">AI Coach</h1>
         <p className="text-slate-500 text-sm mt-1">
@@ -70,44 +145,67 @@ export default function CoachPage() {
       {/* محتوى Insights */}
       {activeTab === "insights" && (
         <div className="space-y-4">
-          {MOCK_INSIGHTS.map((insight) => (
-            <div
-              key={insight.title}
-              className="bg-white rounded-xl border border-slate-200 p-4"
-            >
-              <div className="flex items-start gap-3">
-                <span className="text-2xl">{insight.icon}</span>
-                <div>
-                  <p className="font-semibold text-slate-900">
-                    {insight.title}
-                  </p>
-                  <p className="text-sm text-slate-600 mt-1 leading-relaxed">
-                    {insight.message}
-                  </p>
-                </div>
-              </div>
+          {loadingInsights ? (
+            <div className="text-center py-8 text-slate-400">
+              <p className="text-sm">Loading AI insights...</p>
             </div>
-          ))}
+          ) : (
+            <>
+              {insightsError && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3">
+                  <p className="text-sm text-amber-700">{insightsError}</p>
+                </div>
+              )}
 
-          {/* Whoop Data Preview */}
+              {insights.map((insight, i) => (
+                <div
+                  key={i}
+                  className="bg-white rounded-xl border border-slate-200 p-4"
+                >
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl">{insight.icon}</span>
+                    <div>
+                      <p className="font-semibold text-slate-900">
+                        {insight.title}
+                      </p>
+                      <p className="text-sm text-slate-600 mt-1 leading-relaxed">
+                        {insight.message}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {/* زر إعادة التحميل */}
+              <button
+                onClick={loadInsights}
+                className="w-full py-2 text-sm text-blue-600 font-medium"
+              >
+                ↻ Refresh Insights
+              </button>
+            </>
+          )}
+
+          {/* Whoop Data Preview — بعدين يتربط */}
           <div className="bg-gradient-to-r from-slate-900 to-slate-700 rounded-xl p-4 text-white">
             <p className="text-xs font-medium text-slate-300 mb-2">
               WHOOP DATA
             </p>
             <div className="grid grid-cols-3 gap-4">
               <div>
-                <p className="text-2xl font-bold">78%</p>
+                <p className="text-2xl font-bold">—</p>
                 <p className="text-xs text-slate-400">Recovery</p>
               </div>
               <div>
-                <p className="text-2xl font-bold">14.2</p>
+                <p className="text-2xl font-bold">—</p>
                 <p className="text-xs text-slate-400">Strain</p>
               </div>
               <div>
-                <p className="text-2xl font-bold">52</p>
+                <p className="text-2xl font-bold">—</p>
                 <p className="text-xs text-slate-400">HRV</p>
               </div>
             </div>
+            <p className="text-xs text-slate-400 mt-2">Connect Whoop to see live data</p>
           </div>
         </div>
       )}
@@ -118,43 +216,72 @@ export default function CoachPage() {
   );
 }
 
+// =============================================
 // واجهة الشات مع الـ AI Coach
+// =============================================
 function ChatView() {
   const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
   const [messages, setMessages] = useState<
     { role: "user" | "assistant"; content: string }[]
   >([
     {
       role: "assistant",
       content:
-        "Hey! I'm your AI fitness coach. Ask me anything about your training, nutrition, or recovery. I have access to your workout logs and Whoop data.",
+        "Hey! I'm your AI fitness coach. Ask me anything about your training, nutrition, or recovery.",
     },
   ]);
 
-  const handleSend = () => {
-    if (!message.trim()) return;
+  const handleSend = async () => {
+    if (!message.trim() || sending) return;
+
+    const userMessage = message.trim();
+    setMessage("");
 
     // نضيف رسالة المستخدم
-    setMessages([...messages, { role: "user", content: message }]);
+    const newMessages = [
+      ...messages,
+      { role: "user" as const, content: userMessage },
+    ];
+    setMessages(newMessages);
+    setSending(true);
 
-    // TODO: إرسال لـ Groq API عبر Render proxy
-    // الحين نرد رد مؤقت
-    setTimeout(() => {
-      setMessages((prev) => [
-        ...prev,
+    try {
+      // نرسل كل المحادثة للبروكسي
+      const res = await fetch(`${PROXY_URL}/api/coach`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: newMessages.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+        }),
+      });
+
+      if (!res.ok) throw new Error("Failed to get response");
+
+      const data = await res.json();
+      setMessages([
+        ...newMessages,
+        { role: "assistant", content: data.reply },
+      ]);
+    } catch (err) {
+      console.error("Chat error:", err);
+      setMessages([
+        ...newMessages,
         {
           role: "assistant",
-          content:
-            "I'll be able to give you real advice once we connect the Groq API! For now, this is a placeholder response.",
+          content: "Sorry, I couldn't respond right now. The server might be warming up — try again in a moment.",
         },
       ]);
-    }, 500);
-
-    setMessage("");
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col pb-4">
       {/* الرسائل */}
       <div className="space-y-3 mb-4">
         {messages.map((msg, i) => (
@@ -173,6 +300,13 @@ function ChatView() {
             </div>
           </div>
         ))}
+        {sending && (
+          <div className="flex justify-start">
+            <div className="bg-white border border-slate-200 text-slate-400 px-4 py-2.5 rounded-2xl rounded-bl-md text-sm">
+              Thinking...
+            </div>
+          </div>
+        )}
       </div>
 
       {/* إدخال الرسالة */}
@@ -187,7 +321,7 @@ function ChatView() {
         />
         <button
           onClick={handleSend}
-          disabled={!message.trim()}
+          disabled={!message.trim() || sending}
           className="h-11 w-11 flex items-center justify-center bg-blue-600 text-white rounded-full hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 transition-colors"
         >
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
